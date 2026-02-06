@@ -2,20 +2,24 @@ import numpy as np
 import math
 
 # --- Robot Dimensions (Global) ---
-L1 = 1.0
-L2 = 1.0
-L3 = 1.0
-L4 = 1.0
-L5 = 0.5
-dt = 0.01
+# Link lengths corresponding to Denavit-Hartenberg parameters
+L1, L2, L3, L4, L5 = 1.0, 1.0, 1.0, 1.0, 0.5
 
-def get_transforms(theta): # Helper to get all T matrices Alon Bicknell
-    t1, t2, t3, t4, t5, t6 = theta
+def calculate_fk_transforms(joint_angles):
+    """
+    Calculates the Forward Kinematics (FK).
+    Returns a list of 4x4 Transformation Matrices relative to the base frame
+    for each link (T1 through T6).
+    """
+    # Unpack angles
+    t1, t2, t3, t4, t5, t6 = joint_angles
     
-    c = np.cos(theta)
-    s = np.sin(theta)
+    # Precompute cosines and sines
+    c = np.cos(joint_angles)
+    s = np.sin(joint_angles)
     
-    # Transformation Matrices (A1 to A6)
+    # Local Transformation Matrices (DH Parameters)
+    # These represent the offset and rotation from one joint to the next.
     A1 = np.array([[c[0], -s[0], 0, 0], [s[0], c[0], 0, 0], [0, 0, 1, L1], [0, 0, 0, 1]])
     A2 = np.array([[c[1], 0, s[1], 0], [s[1], 0, -c[1], 0], [0, 1, 0, 0], [0, 0, 0, 1]])
     A3 = np.array([[c[2], -s[2], 0, L2*c[2]], [s[2], c[2], 0, L2*s[2]], [0, 0, 1, 0], [0, 0, 0, 1]])
@@ -23,7 +27,8 @@ def get_transforms(theta): # Helper to get all T matrices Alon Bicknell
     A5 = np.array([[c[4], 0, s[4], L4*c[4]], [s[4], 0, -c[4], L4*s[4]], [0, 1, 0, 0], [0, 0, 0, 1]])
     A6 = np.array([[c[5], -s[5], 0, 0], [s[5], c[5], 0, 0], [0, 0, 1, L5], [0, 0, 0, 1]])
 
-    # Forward Kinematics
+    # Global Transformation Matrices (Base to Link)
+    # We multiply them sequentially to get the position relative to the base (0,0,0).
     T1 = A1
     T2 = T1 @ A2
     T3 = T2 @ A3
@@ -33,77 +38,89 @@ def get_transforms(theta): # Helper to get all T matrices Alon Bicknell
     
     return [T1, T2, T3, T4, T5, T6]
 
-def pos(theta): # Returns all joint positions Alon Bicknell
+def extract_joint_positions(joint_angles):
     """
-    Returns a (7, 3) array containing the [x, y, z] coordinates of:
-    Base -> Joint1 -> Joint2 -> Joint3 -> Joint4 -> Joint5 -> EndEffector
+    Extracts the XYZ coordinates of every joint and the end-effector.
+    Useful for visualization.
     """
-    T = get_transforms(theta)
+    transforms = calculate_fk_transforms(joint_angles)
     
     # Robot Base at (0,0,0)
-    p0 = np.array([0, 0, 0])
+    p0 = np.array([0.0, 0.0, 0.0])
     
-    # Extract positions from the transformation matrices
-    p1 = T[0][0:3, 3]
-    p2 = T[1][0:3, 3]
-    p3 = T[2][0:3, 3]
-    p4 = T[3][0:3, 3]
-    p5 = T[4][0:3, 3]
-    p6 = T[5][0:3, 3]
+    # Extract the translation column (first 3 rows, 4th column) from each matrix
+    positions = [p0] + [T[0:3, 3] for T in transforms]
     
-    return np.array([p0, p1, p2, p3, p4, p5, p6])
+    return np.array(positions)
 
-def newtheta(theta, target, dt=0.01): # Alon Bicknell
-    # 1. Get current End Effector Position
-    all_positions = pos(theta)
-    current_pos = all_positions[-1] # The last point is p6
+def compute_ik_step(current_angles, target_pos, dt=0.01):
+    """
+    Performs one iteration of Inverse Kinematics using the Jacobian Inverse method.
+    Calculates the angular velocity needed to move the end-effector toward the target.
+    """
+    # 1. Get current End Effector Position (XYZ)
+    transforms = calculate_fk_transforms(current_angles)
+    current_end_effector_pos = transforms[-1][0:3, 3]
     
-    # 2. Compute Error
-    error_vec = np.array(target) - current_pos
-    error_dist = np.linalg.norm(error_vec)
+    # 2. Compute the Position Error Vector (Direction to target)
+    error_vec = np.array(target_pos) - current_end_effector_pos
+    error_distance = np.linalg.norm(error_vec)
     
-    # 3. Compute Jacobian (Numerical or Geometric approach)
-    # We need T matrices for the z-vectors to build J
-    T = get_transforms(theta)
-    J_pos = np.zeros((6, 6))
+    # 3. Compute the Jacobian Matrix (3x6 for Position only)
+    # The Jacobian relates Joint Velocities (dTheta) to End-Effector Velocities (dV)
+    J_pos = np.zeros((3, 6))
     
-    # T_prev starts as Identity (base frame)
-    T_prev = np.eye(4)
+    # Base frame (Identity)
+    prev_transform = np.eye(4)
     
     for i in range(6):
-        z_prev = T_prev[0:3, 2] # Z-axis of previous joint
-        p_prev = T_prev[0:3, 3] # Position of previous joint
+        # z_axis: The axis of rotation for the current joint
+        z_axis = prev_transform[0:3, 2] 
+        # p_joint: The position of the current joint
+        p_joint = prev_transform[0:3, 3]
         
-        # Cross product for linear velocity influence
-        J_pos[:, i] = np.cross(z_prev, current_pos - p_prev)
+        # The geometric Jacobian column for a revolute joint is: Z x (P_end - P_joint)
+        J_pos[:, i] = np.cross(z_axis, current_end_effector_pos - p_joint)
         
-        # Update T_prev to the current joint's transform
-        T_prev = T[i]
+        # Update transform for the next iteration
+        prev_transform = transforms[i]
 
-    # 4. Apply P-Controller to get velocity
+    # 4. Apply P-Controller (Proportional Control)
+    # We want to move the robot with a velocity proportional to the error
     Kp = 5.0
-    desired_vel = Kp * error_vec
+    desired_velocity = Kp * error_vec
     
-    # 5. Inverse Kinematics (theta_dot = pinv(J) * v)
-    theta_dot = np.linalg.pinv(J_pos) @ desired_vel
-    theta_dot = np.clip(theta_dot, -10.0, 10.0) # Safety limit
+    # 5. Solve for Joint Velocities (Inverse Kinematics)
+    # theta_dot = pseudo_inverse(J) * desired_velocity
+    # This solves the equation: J * theta_dot = v
+    J_pinv = np.linalg.pinv(J_pos)
+    theta_dot = J_pinv @ desired_velocity
     
-    return theta + theta_dot * dt, error_dist
+    # Clip speeds for safety/stability
+    theta_dot = np.clip(theta_dot, -10.0, 10.0)
+    
+    # 6. Integrate to get new angles: new_pos = old_pos + velocity * time
+    new_angles = current_angles + theta_dot * dt
+    
+    return new_angles, error_distance
 
-def thetas_path(start_theta, target, dt=0.01): # Alon Bicknell
-    theta_list = []
-    current_theta = np.array(start_theta)
+def solve_trajectory(start_angles, target_pos, dt=0.01, max_steps=2000, tolerance=0.01):
+    """
+    Iteratively moves the robot until the end-effector reaches the target position.
+    """
+    path_history = []
+    current_angles = np.array(start_angles, dtype=float)
     
-    for i in range(2000):
-        theta_list.append(current_theta)
+    for step in range(max_steps):
+        path_history.append(current_angles)
         
-        current_theta, error = newtheta(current_theta, target, dt)
+        current_angles, error = compute_ik_step(current_angles, target_pos, dt)
         
-        if error < 0.01:
-            print(f"Converged in {i} steps")
+        if error < tolerance:
+            print(f"Converged in {step} steps. Final Error: {error:.4f}")
             break
             
-    return np.array(theta_list)
+    return np.array(path_history)
 
 class GeometricObject:
     def __init__(self, shape_type, x, y, z, width, height, length):
@@ -169,7 +186,7 @@ def check_robot_collision(theta, shapes, step_size=0.1):
         True if collision detected, False otherwise.
     """
     # 1. Get all joint positions (p0, p1, ... p6) using your existing function
-    joints = pos(theta) 
+    joints = extract_joint_positions(theta) 
     
     # 2. Iterate through every link (Base->J1, J1->J2, etc.)
     for i in range(len(joints) - 1):
