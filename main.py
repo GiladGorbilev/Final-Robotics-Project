@@ -2,8 +2,8 @@ import numpy as np
 import math
 
 # --- Robot Dimensions (Global) ---
-# Link lengths corresponding to Denavit-Hartenberg parameters
-L1, L2, L3, L4, L5 = 1.0, 1.0, 1.0, 1.0, 0.5
+# Update Robot Dimensions to match the scale of the environment (e.g., mm)
+L1, L2, L3, L4, L5 = 200.0, 250.0, 200.0, 200.0, 100.0
 
 def calculate_fk_transforms(joint_angles):
     """
@@ -137,15 +137,17 @@ class GeometricObject:
         
         # 1. BLOCK LOGIC (Corner-based)
         if self.shape_type == 'block':
-            # The block starts at x,y,z and extends positively
-            in_x = self.x <= px <= (self.x + self.width)
-            in_y = self.y <= py <= (self.y + self.height)
-            in_z = self.z <= pz <= (self.z + self.length)
-            
-            return in_x and in_y and in_z
+            # Ensure we check from Min to Max, regardless of how width/height were defined
+            x_min, x_max = sorted([self.x, self.x + self.width])
+            y_min, y_max = sorted([self.y, self.y + self.height])
+            z_min, z_max = sorted([self.z, self.z + self.length])
+
+            return (x_min <= px <= x_max) and \
+                (y_min <= py <= y_max) and \
+                (z_min <= pz <= z_max)
 
         # 2. TUBE LOGIC (Center-based XY, Start-based Z)
-        elif self.shape_type == 'hollow_circle':
+        elif self.shape_type == 'tube':
             # Length Check (along X-axis)
             if not (self.x <= px <= (self.x + self.length)):
                 return False
@@ -241,20 +243,3 @@ if is_hit:
     print("CRITICAL WARNING: Robot path is blocked!")
 else:
     print("Path is clear.")
-
-# D. Integration with your 'thetas_path' loop (Concept)
-# You can update your path planner to stop if a collision is detected:
-def safe_thetas_path(start_theta, target, shapes):
-    current_theta = np.array(start_theta)
-    for i in range(2000):
-        # 1. Calculate next step
-        next_theta, err = newtheta(current_theta, target)
-        
-        # 2. PREDICT: Will the next step crash?
-        if check_robot_collision(next_theta, shapes):
-            print("Emergency Stop: Next move causes collision.")
-            break
-            
-        current_theta = next_theta
-
-print(safe_thetas_path(test_theta, [0, 0, 0,0 ,0 ,0], shapes=env_shapes))
